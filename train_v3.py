@@ -220,6 +220,7 @@ class ProgressiveTrainer:
     def __init__(self, config):
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.scaler = torch.cuda.amp.GradScaler()
 
         self.model = SCALENet(base_channels=32).to(self.device)
 
@@ -294,57 +295,59 @@ class ProgressiveTrainer:
             sampler=sampler,
             num_workers=4,
             pin_memory=True,
-            persistent_workers=True,
+            persistent_workers=False,
         )
         self.val_loader = DataLoader(
             self.val_dataset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=4,
-            persistent_workers=True,
+            persistent_workers=False,
         )
 
     def _get_stage(self, epoch):
-        if epoch < 15:
+        if epoch < 40:
             return 256, 16
-        elif epoch < 30:
+        elif epoch < 90:
             return 384, 8
         else:
             return 512, 4
 
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
     def train_epoch(self, epoch):
-        self.model.train()
-        total_loss = 0
-        loss_dict_sum = {}
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
+            self.model.train()
+            total_loss = 0
+            loss_dict_sum = {}
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
 
-        for low_img, high_img, _ in pbar:
-            low_img  = low_img.to(self.device)
-            high_img = high_img.to(self.device)
+            for low_img, high_img, _ in pbar:
+                low_img  = low_img.to(self.device)
+                high_img = high_img.to(self.device)
 
-            pred = self.model(low_img)
-            loss, loss_dict = self.criterion(pred, high_img)
+                with torch.cuda.amp.autocast():                                      # ADDED
+                    pred = self.model(low_img)
+                    loss, loss_dict = self.criterion(pred, high_img)
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
-            self.scheduler.step()   # per-step for OneCycleLR
+                self.optimizer.zero_grad()
+                self.scaler.scale(loss).backward()                                   # CHANGED
+                self.scaler.unscale_(self.optimizer)                                 # ADDED
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)                                     # CHANGED
+                self.scaler.update()                                                 # ADDED
+                self.scheduler.step()
 
-            with torch.no_grad():
-                for ep, p in zip(self.ema_model.parameters(), self.model.parameters()):
-                    ep.data = self.ema_decay * ep.data + (1 - self.ema_decay) * p.data
+                with torch.no_grad():
+                    for ep, p in zip(self.ema_model.parameters(), self.model.parameters()):
+                        ep.data = self.ema_decay * ep.data + (1 - self.ema_decay) * p.data
 
-            total_loss += loss.item()
-            for k, v in loss_dict.items():
-                loss_dict_sum[k] = loss_dict_sum.get(k, 0) + v
+                total_loss += loss.item()
+                for k, v in loss_dict.items():
+                    loss_dict_sum[k] = loss_dict_sum.get(k, 0) + v
 
-            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+                pbar.set_postfix({'loss': f"{loss.item():.4f}"})
 
-        n = len(self.train_loader)
-        return total_loss / n, {k: v / n for k, v in loss_dict_sum.items()}
-
+            n = len(self.train_loader)
+            return total_loss / n, {k: v / n for k, v in loss_dict_sum.items()}
     # ------------------------------------------------------------------
     def validate(self):
         self.ema_model.eval()
@@ -451,6 +454,8 @@ class ProgressiveTrainer:
                 self.best_val_lpips = val_lpips
 
             self.save_checkpoint(epoch, val_loss, val_lpips, is_best)
+            if (epoch + 1) % 10 == 0:
+                torch.save(ckpt, self.checkpoint_dir / f'epoch_{epoch+1}.pth')
 
 
 # ---------------------------------------------------------------------------
