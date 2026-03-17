@@ -454,8 +454,7 @@ class ProgressiveTrainer:
                 self.best_val_lpips = val_lpips
 
             self.save_checkpoint(epoch, val_loss, val_lpips, is_best)
-            if (epoch + 1) % 10 == 0:
-                torch.save(ckpt, self.checkpoint_dir / f'epoch_{epoch+1}.pth')
+    
 
 
 # ---------------------------------------------------------------------------
