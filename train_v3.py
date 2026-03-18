@@ -260,16 +260,11 @@ class ProgressiveTrainer:
 
         # OneCycleLR: warmup + cosine decay in one shot, more stable than CosineAnnealingLR
         steps_per_epoch = len(self.train_loader)
-        self.scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            self.optimizer,
-            max_lr=config.get('lr', 2e-4),
-            epochs=config['epochs'],
-            steps_per_epoch=steps_per_epoch,
-            pct_start=0.1,          # 10% warmup
-            anneal_strategy='cos',
-            div_factor=10.0,
-            final_div_factor=1e4,
-        )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    self.optimizer,
+                    T_max=config['epochs'],
+                    eta_min=1e-6
+                )
 
         self.start_epoch = 0
         self.best_val_lpips = float('inf')  # track LPIPS instead of total loss
@@ -324,17 +319,16 @@ class ProgressiveTrainer:
                 low_img  = low_img.to(self.device)
                 high_img = high_img.to(self.device)
 
-                with torch.cuda.amp.autocast():                                      # ADDED
+                with torch.cuda.amp.autocast():
                     pred = self.model(low_img)
                     loss, loss_dict = self.criterion(pred, high_img)
 
                 self.optimizer.zero_grad()
-                self.scaler.scale(loss).backward()                                   # CHANGED
-                self.scaler.unscale_(self.optimizer)                                 # ADDED
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.scaler.step(self.optimizer)                                     # CHANGED
-                self.scaler.update()                                                 # ADDED
-                self.scheduler.step()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
 
                 with torch.no_grad():
                     for ep, p in zip(self.ema_model.parameters(), self.model.parameters()):
@@ -420,41 +414,46 @@ class ProgressiveTrainer:
 
     # ------------------------------------------------------------------
     def train(self, resume_from=None):
-        if resume_from:
-            self.load_checkpoint(resume_from)
+            if resume_from:
+                self.load_checkpoint(resume_from)
 
-        print("Starting Progressive Training")
-        print("=" * 60)
+            print("Starting Progressive Training")
+            print("=" * 60)
 
-        for epoch in range(self.start_epoch, self.config['epochs']):
-            crop_size, batch_size = self._get_stage(epoch)
-            # Only rebuild loaders (and sampler) when batch size changes
-            self._rebuild_loaders(batch_size)
-            self.train_dataset.augmentation.current_crop_size = crop_size
-            self.val_dataset.augmentation.current_crop_size   = crop_size
+            for epoch in range(self.start_epoch, self.config['epochs']):
+                crop_size, batch_size = self._get_stage(epoch)
+                prev_crop, _ = self._get_stage(epoch - 1) if epoch > 0 else (crop_size, batch_size)
 
-            lr_now = self.optimizer.param_groups[0]['lr']
-            print(f"\n[Epoch {epoch + 1}/{self.config['epochs']}] "
-                  f"crop={crop_size}  batch={batch_size}  lr={lr_now:.2e}")
+                self._rebuild_loaders(batch_size)
+                self.train_dataset.augmentation.current_crop_size = crop_size
+                self.val_dataset.augmentation.current_crop_size   = crop_size
 
-            train_loss, train_dict = self.train_epoch(epoch)
-            val_loss, val_dict, val_lpips = self.validate()
+                if epoch > 0 and crop_size != prev_crop:
+                    for pg in self.optimizer.param_groups:
+                        pg['lr'] = self.config.get('lr', 2e-4) * 0.5
+                    print(f"  Stage transition → LR reset to {self.config.get('lr', 2e-4) * 0.5:.2e}")
 
-            print(f"  Train Loss : {train_loss:.6f}")
-            print(f"  Val   Loss : {val_loss:.6f}")
-            print(f"  Val   SSIM : {val_dict.get('ssim_score', 0):.4f}")
-            print(f"  Val   LPIPS: {val_lpips:.4f}")
-            print(f"  Val   CC   : gray={val_dict.get('gray_constancy', 0):.4f}  "
-                  f"angle={val_dict.get('angle_color', 0):.4f}")
-            print(f"  Val   FFT  : {val_dict.get('fft', 0):.6f}")
+                lr_now = self.optimizer.param_groups[0]['lr']
+                print(f"\n[Epoch {epoch + 1}/{self.config['epochs']}] "
+                    f"crop={crop_size}  batch={batch_size}  lr={lr_now:.2e}")
 
-            # Best model = lowest LPIPS (direct competition metric)
-            is_best = val_lpips < self.best_val_lpips
-            if is_best:
-                self.best_val_lpips = val_lpips
+                train_loss, train_dict = self.train_epoch(epoch)
+                val_loss, val_dict, val_lpips = self.validate()
+                self.scheduler.step()
 
-            self.save_checkpoint(epoch, val_loss, val_lpips, is_best)
-    
+                print(f"  Train Loss : {train_loss:.6f}")
+                print(f"  Val   Loss : {val_loss:.6f}")
+                print(f"  Val   SSIM : {val_dict.get('ssim_score', 0):.4f}")
+                print(f"  Val   LPIPS: {val_lpips:.4f}")
+                print(f"  Val   CC   : gray={val_dict.get('gray_constancy', 0):.4f}  "
+                    f"angle={val_dict.get('angle_color', 0):.4f}")
+                print(f"  Val   FFT  : {val_dict.get('fft', 0):.6f}")
+
+                is_best = val_lpips < self.best_val_lpips
+                if is_best:
+                    self.best_val_lpips = val_lpips
+
+                self.save_checkpoint(epoch, val_loss, val_lpips, is_best)    
 
 
 # ---------------------------------------------------------------------------
