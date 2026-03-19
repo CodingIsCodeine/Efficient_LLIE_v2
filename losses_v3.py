@@ -1,17 +1,3 @@
-"""
-losses_v3.py  —  Competition-tuned loss for low-light enhancement.
-
-Key changes vs v2:
-  1. IlluminationWeightedLoss  — dark regions get MORE gradient signal (fixes blur in black patches)
-  2. GrayWorldColorConstancyLoss — directly penalises channel-mean imbalance (fixes yellow shift)
-  3. AngleColorLoss — cosine-similarity in colour space (channel ratios, not magnitudes) which
-     is orthogonal to L1 and strongly penalises hue drift
-  4. MS-SSIM replaces single-scale SSIM — more robust, better SSIM metric score
-  5. Gradient / edge loss — Sobel-based, directly helps SSIM + perceptual sharpness
-  6. Phase-aware FFT loss instead of magnitude-only — helps DISTS (texture & structure)
-  7. Loss weights re-tuned to balance SSIM / LPIPS / DISTS competition metrics
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

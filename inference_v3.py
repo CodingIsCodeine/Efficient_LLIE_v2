@@ -1,15 +1,3 @@
-"""
-inference_v3.py  —  Inference for both SCALENet v2 and v3.
-
-Changes vs v2:
-- Auto-detects model version from state_dict keys and loads correct class.
-- Default overlap increased to 128 (was 32) for seamless tiling at 512×512.
-- TTA (test-time augmentation): horizontal flip ensemble improves SSIM/LPIPS ~1-3%.
-  Enabled with --tta flag.
-- Post-processing: optional mild unsharp-mask to counteract any residual
-  softness from the model. Enabled with --sharpen flag.
-"""
-
 import torch
 import numpy as np
 from PIL import Image
